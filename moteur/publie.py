@@ -421,6 +421,48 @@ def construit_match(cx, m):
     directions = dict(gps=int(tr is not None), equipes={e: profil_passes(I[e], poss[e], lg, e) for e in (A, B)}, joueurs=roses_joueurs(jo, seqs, tr, dout))
     relances = relance(jo, I, seqs, tr, gk, lg, dout, NOTRE_EQUIPE, eux) if gk is not None else []
     return dict(match_id=match_id, date=m['date'], domicile=A, exterieur=B, score=[m['score_dom'], m['score_ext']], equipes={A: stats_bloc(eq, A), B: stats_bloc(eq, B)}, tags={A: tg_eq.get(A, {}), B: tg_eq.get(B, {})}, tirs=[dict(equipe=a['equipe'], mt=a['mi_temps'], min=int(a['t_s'] // 60), x=r2(a['x']), y=r2(a['y']), but=int(bool(a['but'])), issue=issue_tir(a)) for a in eq if a['tir'] and a['x'] is not None], prog={e: pts([a for a in eq if a['equipe'] == e and a['progressive']]) for e in (A, B)}, tiers={e: pts([a for a in eq if a['equipe'] == e and a['est_passe'] and (a['x'] is not None) and (a['x'] >= TIERS)]) for e in (A, B)}, joueurs=sorted(joueurs.values(), key=lambda j: -j['actions']), couloirs=couloirs, pts_joueurs=pts_j, reseau=[[a, b, n] for (a, b), n in liens.items()], reseau_prog=[[a, b, n] for (a, b), n in liens_prog.items()], couverture=couverture, film=film(eq, jo, chrono, NOTRE_EQUIPE), directions=directions, circuits={e: circuits(I[e], poss[e]) for e in (A, B)}, relance=dict(numero=gk, passes=relances) if relances else None)
+LIEUX = {'dom': True, 'domicile': True, 'home': True, 'd': True, 'ext': False, 'exterieur': False, 'extérieur': False, 'away': False, 'e': False}
+
+def calendrier(equipes, aujourdhui=None):
+    chemin = os.path.join(RACINE, 'calendrier.csv')
+    if not os.path.exists(chemin):
+        return ([], [])
+    aujourdhui = aujourdhui or datetime.date.today()
+    par_nom = {}
+    for e in equipes:
+        par_nom[e['nom'].lower()] = e
+        par_nom[ligue.slug(e['nom'])] = e
+    out, alertes = ([], [])
+    for i, ligne in enumerate(open(chemin, encoding='utf-8-sig'), 1):
+        ligne = ligne.strip()
+        if not ligne or ligne.startswith('#'):
+            continue
+        champs = [c.strip() for c in (ligne.split(';') if ';' in ligne else ligne.split(','))]
+        if len(champs) < 3:
+            alertes.append('!! calendrier.csv ligne %d : il faut date ; adversaire ; dom ou ext' % i)
+            continue
+        date_txt, adv, lieu = (champs[0], champs[1], champs[2].lower())
+        heure = champs[3] if len(champs) > 3 and champs[3] else None
+        try:
+            if '/' in date_txt:
+                j_, m_, a_ = date_txt.split('/')
+                date = datetime.date(int(a_), int(m_), int(j_))
+            else:
+                date = datetime.date.fromisoformat(date_txt)
+        except ValueError:
+            alertes.append('!! calendrier.csv ligne %d : date illisible « %s »' % (i, date_txt))
+            continue
+        if lieu not in LIEUX:
+            alertes.append("!! calendrier.csv ligne %d : « %s » n'est ni dom ni ext" % (i, champs[2]))
+            continue
+        if date < aujourdhui:
+            continue
+        e = par_nom.get(adv.lower()) or par_nom.get(ligue.slug(adv))
+        if e is None:
+            alertes.append("   calendrier.csv ligne %d : « %s » n'est pas dans les classeurs de la ligue (pas de fiche d'avant-match)" % (i, adv))
+        out.append(dict(date=date.isoformat(), heure=heure, adversaire=e['nom'] if e else adv, id=e['id'] if e else None, domicile=LIEUX[lieu]))
+    out.sort(key=lambda m: (m['date'], m['heure'] or ''))
+    return (out, alertes)
 
 def cumul_physique(L):
     T = [x['tot'] for x in L if 'tot' in x]
@@ -456,9 +498,10 @@ def main():
     matchs = [dict(r) for r in cx.execute('SELECT * FROM match ORDER BY date')]
     nom_ligue, alertes_ligue = ligue.publie(DATA)
     try:
-        LM = json.load(open(os.path.join(DATA, 'ligue.json'), encoding='utf-8')).get('matchs', [])
+        LIG = json.load(open(os.path.join(DATA, 'ligue.json'), encoding='utf-8'))
     except FileNotFoundError:
-        LM = []
+        LIG = {}
+    LM = LIG.get('matchs', [])
     index, saison, fiches, cartes = ([], Counter(), {}, {})
     for m in matchs:
         d = construit_match(cx, m)
@@ -506,7 +549,7 @@ def main():
                     c_.setdefault('physique', []).append(dict(match_id=m['match_id'], date=m['date'], adversaire=adv, sans=1))
         with open(os.path.join(DATA, 'match_%s.json' % m['match_id']), 'w', encoding='utf-8') as f:
             json.dump(d, f, ensure_ascii=False, separators=(',', ':'))
-        index.append(dict(match_id=m['match_id'], date=m['date'], adversaire=adv, domicile=d['domicile'] == NOTRE_EQUIPE, competition=COMPET['matchs'].get(m['match_id'], COMPET['defaut']), score=d['score'], resume=nous))
+        index.append(dict(match_id=m['match_id'], date=m['date'], adversaire=adv, domicile=d['domicile'] == NOTRE_EQUIPE, competition=COMPET['matchs'].get(m['match_id'], COMPET['defaut']), score=d['score'], xg=d['xg'], retenir=d['retenir'], resume=nous))
         for k, v in nous.items():
             if isinstance(v, (int, float)) and k != 'prog_depart':
                 saison[k] += v
@@ -540,8 +583,11 @@ def main():
     for n, c_ in cartes.items():
         if c_.get('physique'):
             c_['physique_retenir'] = retenir.physique_joueur(int(n), phys, c_['physique'])
+    cal, alertes_cal = calendrier(LIG.get('equipes', []))
+    for al in alertes_cal:
+        print('  ' + al)
     with open(os.path.join(DATA, 'index.json'), 'w', encoding='utf-8') as f:
-        json.dump(dict(equipe=NOTRE_EQUIPE, maj=datetime.date.today().isoformat(), libelles=libelles.table(), matchs=index, saison=dict(saison), radars=radar.profils(cx, matchs), physique=phys, joueurs=sorted(fiches.values(), key=lambda j: -j['total']['actions'])), f, ensure_ascii=False, separators=(',', ':'))
+        json.dump(dict(equipe=NOTRE_EQUIPE, maj=datetime.date.today().isoformat(), libelles=libelles.table(), retenir=retenir.saison(LIG, NOTRE_EQUIPE) if LIG else [], calendrier=cal, matchs=index, saison=dict(saison), radars=radar.profils(cx, matchs), physique=phys, joueurs=sorted(fiches.values(), key=lambda j: -j['total']['actions'])), f, ensure_ascii=False, separators=(',', ':'))
     for n, c_ in cartes.items():
         with open(os.path.join(DATA, 'joueur_%s.json' % n), 'w', encoding='utf-8') as f:
             json.dump(c_, f, ensure_ascii=False, separators=(',', ':'))

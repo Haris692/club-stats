@@ -141,6 +141,88 @@ def club(e, equipes, matchs):
             haut = h > lm
             C.append(phrase('style', ['an-haut'], abs(h - lm) / 4, 'Récupère le ballon %s : à %d m de son but en moyenne (ligue %d m).' % ('haut' if haut else 'bas', round(h), round(lm)), 'Wins the ball back %s: %d m from its own goal on average (league %d m).' % ('high' if haut else 'deep', round(h), round(lm)), 'يستعيد الكرة في %s: على بعد %d م من مرماه في المتوسط (الدوري %d م).' % ('مناطق متقدمة' if haut else 'مناطق متأخرة', round(h), round(lm))))
     return choisit(C)
+SAISON_LIGNES = [('buts', 0, 'Buts marqués', 'Goals scored', 'الأهداف المسجلة'), ('xg', 0, 'Buts attendus (xG)', 'Expected goals (xG)', 'الأهداف المتوقعة (xG)'), ('tirs', 0, 'Tirs', 'Shots', 'التسديدات'), ('surface', 0, 'Entrées dans la surface adverse', "Entries into the opponent's box", 'الدخول إلى منطقة جزاء الخصم'), ('poss', 1, 'Possession', 'Possession', 'الاستحواذ'), ('passes_pct', 1, 'Passes réussies', 'Pass accuracy', 'دقة التمرير'), ('prog', 1, 'Passes progressives', 'Progressive passes', 'التمريرات التقدمية'), ('t3', 1, 'Entrées dans le dernier tiers', 'Final third entries', 'الدخول إلى الثلث الأخير'), ('bc', 2, 'Buts encaissés', 'Goals conceded', 'الأهداف المستقبلة'), ('xgc', 2, 'Buts attendus concédés (xG)', 'Expected goals conceded (xG)', 'الأهداف المتوقعة ضده (xG)'), ('recup_haut', 2, 'Ballons récupérés dans le camp adverse', "Recoveries in the opponent's half", 'استعادة الكرة في نصف الخصم'), ('duels_pct', 2, 'Duels gagnés', 'Duels won', 'الالتحامات المكسوبة')]
+
+def nb_court(x, dec, lang):
+    r = round(x, dec)
+    return '%d' % r if r == int(r) else nombre(r, dec, lang)
+
+def saison_valeurs(lig, k):
+    if k == 'bc':
+        return {c['id']: c['bc'] / c['j'] for c in lig.get('classement') or [] if c.get('j')}
+    nat = next((d['n'] for d in lig['defs_equipe'] if d['k'] == k), 'n')
+    out = {}
+    for e in lig['equipes']:
+        v = e.get(k)
+        if v is None or not e.get('mj'):
+            continue
+        out[e['id']] = v / e['mj'] if nat in ('n', 'x') else v
+    return out
+
+def saison(lig, nous):
+    moi = next((e for e in lig.get('equipes', []) if e['nom'] == nous), None)
+    if not moi:
+        return []
+    sens = {d['k']: d['s'] for d in lig.get('defs_equipe', [])}
+    sens['bc'] = -1
+    C = []
+    for k, theme, fr, en, ar in SAISON_LIGNES:
+        vals = saison_valeurs(lig, k)
+        if moi['id'] not in vals or len(vals) < 4:
+            continue
+        v, tous = (vals[moi['id']], list(vals.values()))
+        s = sens.get(k, 0)
+        n = len(tous)
+        moy = sum(tous) / n
+        et = (sum(((x - moy) ** 2 for x in tous)) / n) ** 0.5
+        r = rang(tous, v, plus_haut_meilleur=s >= 0)
+        sc = score_rang(r, n)
+        if not sc:
+            continue
+        if s:
+            bon = r <= 2
+            if (v - moy) * s * (1 if bon else -1) <= 0.5 * et:
+                continue
+            type_ = 'fort' if bon else 'faible'
+        else:
+            type_ = 'style'
+            sc *= 0.8
+        sc += min(abs(v - moy) / et, 3) / 10 if et else 0
+        pct = k.endswith('_pct') or k == 'poss'
+        dec = 2 if k in ('xg', 'xgc') else 1
+
+        def val(x, l):
+            return '%d' % round(100 * x) if pct else nb_court(x, dec, l)
+        txt = {}
+        for l, lib in (('fr', fr), ('en', en), ('ar', ar)):
+            a, m, rt = (val(v, l), val(moy, l), rang_txt(r, n, l))
+            if l == 'fr':
+                txt[l] = '%s : %s, %s (moyenne de la ligue : %s).' % (lib, a + ' %' if pct else a + ' par match', rt, m + ' %' if pct else m)
+            elif l == 'en':
+                txt[l] = '%s: %s, %s (league average: %s).' % (lib, a + ' %' if pct else a + ' per match', rt, m + ' %' if pct else m)
+            else:
+                txt[l] = '%s: %s، %s (متوسط الدوري: %s).' % (lib, a + '٪' if pct else a + ' في المباراة', rt, m + '٪' if pct else m)
+        c = phrase(type_, ['ac-l-' + k, 'ac-ligue'], sc, txt['fr'], txt['en'], txt['ar'])
+        c['theme'] = theme
+        C.append(c)
+    C.sort(key=lambda c: -c['score'])
+    pris = []
+    for c in C:
+        if len(pris) < 3 and all((c['theme'] != p['theme'] for p in pris)):
+            pris.append(c)
+    for c in C:
+        if len(pris) < 3 and c not in pris:
+            pris.append(c)
+    faibles = [c for c in C if c['type'] == 'faible']
+    if faibles and (not any((c['type'] == 'faible' for c in pris))):
+        if len(pris) == 3:
+            pris.pop()
+        pris.append(faibles[0])
+    pris.sort(key=lambda c: c['theme'])
+    for c in pris:
+        c.pop('score', None)
+        c.pop('theme', None)
+    return pris
 
 def _minute(m, mt1):
     if m <= mt1:
